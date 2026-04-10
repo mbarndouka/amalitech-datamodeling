@@ -1,0 +1,64 @@
+3.4 ETL LOGIC
+
+1 Dimension logic
+    - dim_patient (Incremental Load):
+        - Pattern: Select records from 'patients' source.
+        - Transformation: Calculate 'age_at_encounter' using DOB.
+        - Logic: Check for existing 'patient_id'. If match exists, update current record (SCD Type 1). If no match, insert new record and generate 'patient_key' (Surrogate Key).
+
+    - dim_date (One-time Load):
+        - Pattern: Manual Script/Sequence Generation.
+        - Logic: Pre-populate 10-20 years of data. Extract Year, Month, Day, and Quarter. Format 'year_months' as "YYYY-MM" string. Pre-calculate 'is_weekend'.
+        - Benefit: Prevents DATE_FORMAT() function from killing index performance in Fact queries.
+
+    - Handling Updates (SCD):
+        - Type 1 (Overwrite): For corrections (typos in names).
+        - Type 2 (History): For data that changes over time (Provider specialty change). Add 'row_is_current' flag to ensure the Fact table links to the state of the dimension *at the time of the event*.
+
+2 Fact Table Logic (The "Performance Sink")
+    - Key Lookups (Surrogate Key Translation):
+        - For each source field (e.g., source.patient_id), we perform a JOIN or a Lookup against the dimension tables (e.g., dim_patient.patient_id) to retrieve the unique 'patient_key'.
+        - This translation ensures the Fact table only stores small, optimized integer keys rather than heavy strings or business identifiers.
+
+    - Metrics Aggregation (Pre-calculation):
+        - Readmission: We use a Window Function or Subquery to find the previous 'discharge_date' for the same patient. If the gap to the current 'encounter_date' is <= 30 days, we set 'is_readmission_flag' to 1.
+        - Revenue: We perform a LEFT JOIN to the source 'billing' table and SUM('allowed_amount') grouped by 'encounter_id' BEFORE the final insert into the Fact table.
+        - Counters: We count related rows in diagnosis/procedure junction tables to store 'total_diagnosis_count' as a simple integer.
+
+    - Handling Missing Data (Data Quality):
+        - Default Keys: If a dimension lookup fails (e.g., a provider is missing from dim_provider), we assign a 'Natural Key' of -1 or 0 (representing "Unknown").
+        - Why: This prevents the loss of Fact data during INNER JOINs. We never discard an encounter just because its department is unknown.
+        - Null Handling: For metrics, we use COALESCE(metric, 0) to ensure a patient with no bills shows "0.00" rather than NULL, which simplifies visualization tools.
+
+    - Why: We move the heavy DATEDIFF and SUM math from the Query-time (User) to the Load-time (System).
+
+3 Bridge Table Load Logic (Many-to-Many Relationships)
+    - bridge_encounter_diagnoses:
+        - Source: 'encounter_diagnoses' junction table.
+        - Process:
+            1. JOIN 'encounter_diagnoses' with the target 'fact_encounters' on 'encounter_id' to retrieve the new 'fact_key'.
+            2. JOIN 'diagnoses' with 'dim_diagnosis' on 'diagnosis_id' to retrieve the 'diagnosis_key'.
+            3. INSERT the ('fact_key', 'diagnosis_key', 'diagnosis_sequence') into the bridge.
+        - Note: This allows us to keep multiple diagnoses per encounter without breaking the grain of the main Fact table.
+
+    - bridge_encounter_procedures:
+        - Source: 'encounter_procedures' junction table.
+        - Process:
+            1. JOIN 'encounter_procedures' with 'fact_encounters' to get the 'fact_key'.
+            2. JOIN 'procedures' with 'dim_procedure' to get the 'procedure_key'.
+            3. INSERT ('fact_key', 'procedure_key', 'procedure_date') into the bridge.
+        - Benefit: Enables "Question 2" style analysis (Diagnosis-Procedure combinations) while keeping the center of the Star Schema lean and fast.
+
+4 Refresh Strategy
+    - Load Frequency (Daily Incremental):
+        - Strategy: We use a 'Daily Incremental' load rather than a full refresh.
+        - Process: Each night, the ETL identifies records in the source system with an 'updated_at' timestamp greater than the last successful load.
+        - Why: A full refresh of millions of healthcare encounters is too slow and resource-intensive. Incremental loads keep the warehouse near real-time while minimizing server impact.
+
+    - Handling Late-Arriving Facts:
+        - Scenario: Healthcare data often arrives late (e.g., a bill is generated 45 days after the encounter).
+        - Logic:
+            1. We use a 'Look-back Window' (e.g., 90 days). The ETL re-scans the last 3 months of source data for any changes to existing encounters.
+            2. If a bill arrives for an old encounter, we update the 'total_allowed_amount' in the corresponding 'fact_encounters' row.
+            3. If a patient is readmitted later, we retroactively update the 'is_readmission_flag' of the *previous* encounter to '1'.
+        - Why: This ensures that our financial and clinical metrics (like 30-day readmission rates) remain accurate even as new data trickles in from different departments.
