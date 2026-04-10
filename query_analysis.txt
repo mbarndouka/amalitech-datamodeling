@@ -1,0 +1,99 @@
+QUESTION 1: Monthly Encounters by Specialty
+SQL Query:
+SELECT
+    DATE_FORMAT(e.encounter_date, "%Y-%m") AS date_month,
+    s.specialty_name AS specialty,
+    e.encounter_type AS encounter_typ,
+    COUNT(e.encounter_id) AS encounter_counter,
+    COUNT(DISTINCT e.patient_id) AS provider_count
+FROM encounters e
+JOIN providers p ON e.provider_id = p.provider_id
+JOIN specialties s ON p.specialty_id = s.specialty_id
+GROUP BY date_month, specialty, encounter_typ
+ORDER BY date_month, specialty;
+
+Schema Analysis:
+Tables joined: encounters, providers, specialties
+Number of joins: 2
+Performance:
+Execution time: 1.349 seconds
+Estimated rows scanned: Full Table Scan (All rows in encounters)
+Bottleneck Identified:
+The use of the DATE_FORMAT function on the encounter_date column suppresses index usage, forcing a Full Table Scan. The database must also create a temporary table and perform a filesort to handle grouping and sorting by calculated strings.
+
+---------------------------------------------------------
+
+QUESTION 2: Common Diagnosis-Procedure Combinations
+SQL Query:
+SELECT
+    d.icd10_code,
+    p.cpt_code,
+    COUNT(DISTINCT ep.encounter_id) AS encounter_count
+FROM diagnoses d
+JOIN encounter_diagnoses ed ON d.diagnosis_id = ed.diagnosis_id
+JOIN encounter_procedures ep ON ep.encounter_id = ed.encounter_id
+JOIN procedures p ON p.procedure_id = ep.procedure_id
+GROUP BY d.icd10_code, p.cpt_code
+ORDER BY encounter_count DESC;
+
+Schema Analysis:
+Tables joined: diagnoses, encounter_diagnoses, encounter_procedures, procedures
+Number of joins: 3
+Performance:
+Execution time: 0.494 seconds
+Estimated rows scanned: Dependent on junction table sizes
+Bottleneck Identified:
+The query requires navigating two different many-to-many relationships simultaneously. Performance is limited by the lack of covering indexes on the junction tables (encounter_diagnoses and encounter_procedures) for the specific ICD and CPT columns used in the GROUP BY.
+
+---------------------------------------------------------
+
+QUESTION 3: Specialty Readmission Rates
+SQL Query:
+SELECT
+    s.specialty_name,
+    COUNT(DISTINCT e.encounter_id) AS total_inpatient_stay,
+    COUNT(DISTINCT e2.encounter_id) AS readmission_count,
+    (COUNT(DISTINCT e2.encounter_id) / COUNT(DISTINCT e.encounter_id)) * 100 AS readmission_rate
+FROM specialties s
+JOIN providers p ON s.specialty_id = p.specialty_id
+JOIN encounters e ON p.provider_id = e.provider_id
+LEFT JOIN encounters e2 ON e.patient_id = e2.patient_id
+    AND e2.encounter_date > e.discharge_date
+    AND DATEDIFF(e2.encounter_date, e.discharge_date) <= 30
+WHERE e.discharge_date IS NOT NULL AND e.encounter_type = 'inpatient'
+GROUP BY s.specialty_name
+ORDER BY readmission_count DESC;
+
+Schema Analysis:
+Tables joined: specialties, providers, encounters (e1), encounters (e2/Self-join)
+Number of joins: 3
+Performance:
+Execution time: 0.431 seconds
+Estimated rows scanned: High (due to self-join expansion)
+Bottleneck Identified:
+The self-join on patient_id creates a large intermediate result set for patients with many encounters. Using non-equi join conditions (> and DATEDIFF) prevents efficient Hash Joins, forcing intensive Nested Loop processing and a heavy deduplication step via COUNT(DISTINCT).
+
+---------------------------------------------------------
+
+QUESTION 4: Revenue by Specialty & Month
+SQL Query:
+SELECT
+    DATE_FORMAT(e.encounter_date, "%Y-%m") AS date_month,
+    s.specialty_name AS specialty,
+    SUM(b.allowed_amount) AS total_allowed_amount
+FROM billing b
+JOIN encounters e ON b.encounter_id = e.encounter_id
+JOIN providers p ON e.provider_id = p.provider_id
+JOIN specialties s ON p.specialty_id = s.specialty_id
+GROUP BY date_month, specialty
+ORDER BY date_month, specialty;
+
+Schema Analysis:
+Tables joined: billing, encounters, providers, specialties
+Number of joins: 3
+Performance:
+Execution time: 0.592 seconds
+Estimated rows scanned: All rows in billing linked to encounters
+Bottleneck Identified:
+The DATE_FORMAT function prevents the engine from using date indexes for the grouping. Additionally, joining the high-volume billing table across three entities requires significant memory allocation and a final filesort to aggregate results by non-indexed strings.
+
