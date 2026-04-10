@@ -1,0 +1,86 @@
+Part 3: Design the Star Schema
+
+Decision 1:
+    Option A: One row per encounter
+
+Decision 2:
+    1 Date dimension (dim_date):
+        - date_key (PK)
+        - full_date
+        - year
+        - month
+        - month_name
+        - quarter
+        - year_month (YYYY-MM)
+        - Is_weekend
+    Why: This solves the steps 1 and 4 bottleneck. By pre-calculating the year_month string, we stop using the  DATE_FORMAT() in queries, allowing the database to perform the simple index lookups instead of the full table scans.
+
+    2 Patient dimension (dim_patient):
+        - patient_key (PK),
+        - mrn,
+        - first_name,
+        - last_name,
+        - gender,
+        - birth_date,
+        - age_at_encounter.
+    Why: this flattend the patient metadata into a single table. It allows for demographic analysis without reaching back to the normalized table.
+
+    3 Provider dimension (dim_provider):
+        - provider_key (PK),
+        - Provider_name,
+        - credential,
+    Why: Provider a consistent a way to track which doctor performed the encounter.
+
+    4 Specialty dimension (dim_specialty):
+        - specialty_key (PK),
+        - specialty_name
+        - specialty_code
+    Why: Crucial for performance. In our currrent model, we have to go Encouters -> Providers -> Specialities (2 joins). In the star schem, we link dim_speciality to fact table, reducing a 3 table join a simple 2 table lookup.
+
+    5 Departement dimension (dim_department):
+        - department_key (PK),
+        - department_name
+    Why:Isolates the physical location from clinical encounter data.
+
+    6 Encounter Type dimension (dim_encounter):
+        - encounter_type_key (PK),
+        - type_name (Inpatient, ER, etc.),
+        - is_emergency_flag
+    Why: Simplifies the filtering for step 3(readmission) by allowing us to filter on a single integer key rather than doing string comparisons on large tables.
+
+    7 diagnoses dimension (dim_diagnosis):
+        - diagnosis_key (PK)
+        - icd10_code
+        - icd10_description
+    Why:his addresses the bottleneck in Question 2. Currently, you have a complex many-to-many relationship involving encounter_diagnoses and diagnoses. By moving this into a dimension, you can link it directly to a Fact table. This eliminates the need to join high-volume junction tables just to retrieve the icd10_code, drastically reducing the "Estimated rows scanned" and moving away from the "Dependent on junction table sizes" bottleneck noted in your console.
+
+    8 Procedure dimension (dim_procedure):
+        - procedure_key (PK)
+        - cpt_code
+        - cpt_description
+    Why:This targets the performance issues in Question 2 and potential future revenue analysis. In the current schema, the database performs separate lookups for procedures and encounter_procedures. A dedicated dimension allows for grouping by cpt_code using a simple integer key in the Fact table. This removes the "Temporary table and filesort" requirement for non-indexed string columns (cpt_code) that you identified in your console as a major performance killer.
+
+Decision 3: Pre-Aggregated Metrics
+    - total_diagnosis_count: Avoids joining encounter_diagnoses bridge table.
+    - total_procedure_count: Avoids joining encounter_procedures bridge table.
+    - total_allowed_amount: Solves Question 4 bottleneck by removing the join to high-volume billing table.
+    - length_of_stay_days: Pre-calculating discharge math for faster flow analysis.
+    - is_readmission_flag: Eliminates the expensive self-join and nested loop processing identified in Question 3.
+
+Why: Pre-aggregation moves the computational cost from the query-time (user waiting) to the load-time (system processing). It converts complex, memory-intensive many-to-many joins into simple single-table aggregations.
+
+Decision 4: Bridge Tables
+    Choice: Hybrid Approach (Primary Keys in Fact + Bridge for Clinical Depth)
+
+    Why:
+    - The Fact Table will store 'primary_diagnosis_key' and 'primary_procedure_key'.
+      This allows Questions 1, 3, and 4 to run with zero extra joins, directly
+      addressing the "Filesort" and "Memory Allocation" bottlenecks found in the console.
+
+    - We will maintain a Bridge Table (fact_encounter_diagnoses) specifically for
+      Question 2. This ensures we can still analyze complex clinical combinations
+      (like a patient with both Diabetes and Hypertension) without bloating the
+      main Fact table grain.
+
+    - This strikes the perfect balance: 90% of reports run at maximum speed,
+      while 10% maintain 100% clinical accuracy.
