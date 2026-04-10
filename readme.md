@@ -1,29 +1,41 @@
-# Healthcare Data Modeling & Performance Lab
+# Healthcare Data Speed & Design Lab
 
-This project focuses on analyzing healthcare encounter data, diagnosis-procedure combinations, and readmission metrics using SQL. It includes performance analysis and query optimization strategies.
+This project shows how to take a slow healthcare database and make it much faster using "Star Schema" design. We focused on solving real-world problems like tracking patient readmissions and hospital revenue.
 
-## Project Structure
-- `old_schema.sql`: Database schema and sample data.
-- `console.sql`: SQL queries, `EXPLAIN` plans, and performance documentation.
+## Project Files
+- `old_schema.sql`: The original database (slow but organized).
+- `star_schema.sql`: The new, faster database design.
+- `etl_process.sql`: The code that moves and cleans data.
+- `etl_design.txt`: Detailed logic for the data moving process.
+- `design_decisions.txt`: Documentation of all table and column choices.
+- `query_analysis.txt`: Breakdown of original performance issues.
+- `star_schema_queries.txt`: Optimized SQL results and speed comparisons.
+- `reflection.md`: A deep dive into why these changes work (Project Deliverable).
 
-## Analysis Steps
+---
 
-### 1. Monthly Encounters by Specialty
-**Objective:** Calculate total encounters and unique patients per month, specialty, and encounter type.
-**Optimization Note:** Identified that using `DATE_FORMAT` on indexed columns in a `GROUP BY` clause can trigger a Full Table Scan (`ALL`).
+## What We Solved
 
-### 2. Diagnosis-Procedure Combinations
-**Objective:** Find the most frequent pairs of ICD-10 diagnosis codes and CPT procedure codes.
-**Technical Detail:** Implemented a 4-table join linking `diagnoses` → `encounter_diagnoses` → `encounter_procedures` → `procedures`.
+### 1. Speeding Up Date Reports
+**Problem:** The original system was slow when counting visits per month because it had to calculate the date for every single record during the search.
+**Solution:** We created a `dim_date` table that has the month and year already written out. Now the database just looks it up instantly instead of doing math.
 
-### 3. Specialty Readmission Rates
-**Objective:** Calculate the 30-day readmission rate per specialty.
-**Logic:** 
-- Used a **Self-Join** on the `encounters` table (matching on `patient_id`).
-- Defined readmissions as any subsequent encounter occurring within 0-30 days of an `Inpatient` discharge date.
-- Utilized a `LEFT JOIN` to ensure the denominator includes all inpatient stays, even those without a return visit.
+### 2. Simplifying Clinical Data
+**Problem:** Finding which diagnosis code matches which procedure code required joining 4 different tables, which is very heavy for the computer.
+**Solution:** We used bridge tables and simplified dimensions so the database has fewer "hops" to make to find the answer.
 
-## Performance & Senior-Level Observations
-- **Join Complexity:** Multiple joins across large transactional tables (encounters/diagnoses) require careful indexing on foreign keys.
-- **Self-Join Cost:** To optimize the readmission query, date filters (`e2.encounter_date > e.discharge_date`) are applied within the join condition to reduce the Cartesian product before aggregation.
-- **Aggregation:** `COUNT(DISTINCT ...)` is used to ensure data integrity when calculating rates across joined encounter pairs.
+### 3. Fixing the "Readmission" Calculation
+**Problem:** To see if a patient came back within 30 days, the old system had to compare every visit to every other visit. This was the slowest part of the whole system.
+**Solution:** We did the math **before** saving the data. We added a simple checkbox (flag) to each visit that says "Yes" or "No" for readmission. Now the report just counts the "Yes" marks.
+
+---
+
+## Why the New Design is Better
+
+1.  **Fewer Joins:** In the old way, you had to connect 3 or 4 tables to get a specialty name. In the new way, it's always just **one connection** away.
+2.  **No More Busy Work:** We moved the heavy math (like calculating age or total bills) to the "loading" stage. When a user runs a report, the answers are already there waiting for them.
+3.  **Accuracy:** By using "Bridge Tables," we make sure that if a patient has 3 different diagnoses, we don't accidentally triple-count their hospital bill.
+
+## Performance Results
+- **Monthly Reports:** Went from 1.3 seconds to 0.04 seconds (**30x faster**).
+- **Readmission Reports:** Went from 0.4 seconds to 0.02 seconds (**17x faster**).
