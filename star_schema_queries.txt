@@ -1,0 +1,80 @@
+QUESTION 1: Monthly Encounters by Specialty
+SQL Query:
+SELECT
+    d.year_months AS date_month,
+    s.specialty_name AS specialty,
+    et.type_name AS encounter_typ,
+    COUNT(f.encounter_id) AS encounter_counter,
+    COUNT(DISTINCT f.patient_key) AS patient_count
+FROM fact_encounters f
+JOIN dim_date d ON f.date_key = d.date_key
+JOIN dim_specialty s ON f.specialty_key = s.specialty_key
+JOIN dim_encounter_type et ON f.encounter_type_key = et.encounter_type_key
+GROUP BY d.year_months, s.specialty_name, et.type_name
+ORDER BY d.year_months, s.specialty_name;
+
+Performance:
+Execution time estimate: ~45ms vs. 1.349s original
+Improvement factor: 30x faster
+Explanation: By joining to dim_date and grouping on the pre-calculated year_months column, we avoid the DATE_FORMAT function which was disabling index usage. The star schema also reduces the join path to specialty from 2 joins to 1.
+
+---------------------------------------------------------
+
+QUESTION 2: Common Diagnosis-Procedure Combinations
+SQL Query:
+SELECT
+    diag.icd10_code,
+    proc.cpt_code,
+    COUNT(DISTINCT b1.fact_key) AS encounter_count
+FROM bridge_encounter_diagnoses b1
+JOIN bridge_encounter_procedures b2 ON b1.fact_key = b2.fact_key
+JOIN dim_diagnosis diag ON b1.diagnosis_key = diag.diagnosis_key
+JOIN dim_procedure proc ON b2.procedure_key = proc.procedure_key
+GROUP BY diag.icd10_code, proc.cpt_code
+ORDER BY encounter_count DESC;
+
+Performance:
+Execution time estimate: ~80ms vs. 0.494s original
+Improvement factor: 6x faster
+Explanation: The bridge tables are optimized for these many-to-many relationships with specific indexes on surrogate keys, and we avoid joining the heavy encounters table entirely by using the fact_key in the bridges.
+
+---------------------------------------------------------
+
+QUESTION 3: Specialty Readmission Rates
+SQL Query:
+SELECT
+    s.specialty_name,
+    COUNT(f.fact_key) AS total_inpatient_stay,
+    SUM(CASE WHEN f.is_readmission_flag = 1 THEN 1 ELSE 0 END) AS readmission_count,
+    (SUM(CASE WHEN f.is_readmission_flag = 1 THEN 1 ELSE 0 END) / COUNT(f.fact_key)) * 100 AS readmission_rate
+FROM fact_encounters f
+JOIN dim_specialty s ON f.specialty_key = s.specialty_key
+JOIN dim_encounter_type et ON f.encounter_type_key = et.encounter_type_key
+WHERE et.type_name = 'Inpatient'
+GROUP BY s.specialty_name
+ORDER BY readmission_count DESC;
+
+Performance:
+Execution time estimate: ~25ms vs. 0.431s original
+Improvement factor: 17x faster
+Explanation: The expensive self-join and DATEDIFF logic are eliminated because is_readmission_flag is pre-calculated during the ETL process and stored directly in the fact table.
+
+---------------------------------------------------------
+
+QUESTION 4: Revenue by Specialty & Month
+SQL Query:
+SELECT
+    d.year_months AS date_month,
+    s.specialty_name AS specialty,
+    SUM(f.total_allowed_amount) AS total_allowed_amount
+FROM fact_encounters f
+JOIN dim_date d ON f.date_key = d.date_key
+JOIN dim_specialty s ON f.specialty_key = s.specialty_key
+GROUP BY d.year_months, s.specialty_name
+ORDER BY d.year_months, s.specialty_name;
+
+Performance:
+Execution time estimate: ~30ms vs. 0.592s original
+Improvement factor: 20x faster
+Explanation: The high-volume billing table join is eliminated by using the pre-aggregated total_allowed_amount in the fact table. Joining only two small dimensions (dim_date, dim_specialty) is significantly faster than the original 3-join path over un-indexed date strings.
+
